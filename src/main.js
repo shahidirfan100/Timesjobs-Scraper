@@ -3,6 +3,7 @@ import { Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load as cheerioLoad } from 'cheerio';
 
+const ACTOR_VERSION = '2025-12-14.1';
 const API_BASE = 'https://tjapi.timesjobs.com';
 const SEARCH_ENDPOINT = `${API_BASE}/search/api/v1/search/jobs/list`;
 const DETAIL_ENDPOINT = (id) => `${API_BASE}/job-api/api/jobs/public/${id}`;
@@ -72,12 +73,40 @@ const chunk = (arr, size) => {
     return res;
 };
 
+const deriveSearchFromUrls = (urls) => {
+    const derived = {};
+    for (const raw of urls || []) {
+        try {
+            const u = new URL(raw);
+            const qp = u.searchParams;
+
+            const kw = qp.get('keywords') || qp.get('txtKeywords');
+            const loc = qp.get('location') || qp.get('txtLocation');
+            const fa = qp.get('functionAreaId') || qp.get('cboPresFuncArea');
+            const exp = qp.get('experience');
+            const expFrom = qp.get('experienceFrom') || qp.get('cboWorkExp1');
+            const expTo = qp.get('experienceTo') || qp.get('cboWorkExp2');
+
+            if (kw && !derived.keyword) derived.keyword = kw;
+            if (loc && !derived.location) derived.location = loc;
+            if (fa && !derived.functionAreaId) derived.functionAreaId = fa;
+            if (exp && !derived.experience) derived.experience = exp;
+            if (expFrom && !derived.experienceFrom) derived.experienceFrom = Number(expFrom);
+            if (expTo && !derived.experienceTo) derived.experienceTo = Number(expTo);
+        } catch (_) {
+            // ignore invalid urls
+        }
+    }
+    return derived;
+};
+
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
     const {
         keyword = '',
         location = '',
         experience = '',
+        functionAreaId: FUNCTION_AREA_ID_INPUT,
         results_wanted: RESULTS_WANTED_RAW = 100,
         max_pages: MAX_PAGES_RAW = 10,
         collectDetails = true,
@@ -119,17 +148,45 @@ await Actor.main(async () => {
         }
     };
 
+    const initialUrls = [];
+    if (Array.isArray(startUrls) && startUrls.length) initialUrls.push(...startUrls);
+    if (startUrl) initialUrls.push(startUrl);
+    if (url) initialUrls.push(url);
+    if (!initialUrls.length) initialUrls.push(buildStartUrl(keyword, location, experience));
+
+    const derived = deriveSearchFromUrls(initialUrls);
+    const effectiveKeyword = keyword || derived.keyword || '';
+    const effectiveLocation = location || derived.location || '';
+    const effectiveFunctionAreaId = FUNCTION_AREA_ID_INPUT || derived.functionAreaId || undefined;
+    const effectiveExperience = experience || derived.experience || '';
+
+    log.info(`Actor version: ${ACTOR_VERSION}`);
+
     const seen = new Set();
     let saved = 0;
 
-    const expRange = parseExperience(experience);
+    const expRangeFromInput = parseExperience(effectiveExperience);
+    const expRangeFromUrl = {
+        experienceFrom: Number.isFinite(derived.experienceFrom) ? derived.experienceFrom : undefined,
+        experienceTo: Number.isFinite(derived.experienceTo) ? derived.experienceTo : undefined,
+    };
+    const expRange = {
+        experienceFrom: expRangeFromInput.experienceFrom ?? expRangeFromUrl.experienceFrom,
+        experienceTo: expRangeFromInput.experienceTo ?? expRangeFromUrl.experienceTo,
+    };
 
     async function fetchJson(opts, { allowDirectFallback = true } = {}) {
         const parseJsonResponse = (res) => {
+            const contentType = String(res?.headers?.['content-type'] || '');
             const body = res?.body;
             if (body && typeof body === 'object' && !Buffer.isBuffer(body)) return body;
             const text = Buffer.isBuffer(body) ? body.toString('utf-8') : String(body ?? '');
-            return JSON.parse(text);
+            try {
+                return JSON.parse(text);
+            } catch (err) {
+                const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 250);
+                throw new Error(`Expected JSON but got ${contentType || 'unknown content-type'}: ${snippet}`);
+            }
         };
 
         const attempt = async (useProxy) => {
@@ -202,12 +259,13 @@ await Actor.main(async () => {
 
     async function fetchApiPage(page, pageSize) {
         const payload = {
-            keywords: keyword || undefined,
-            location: location || undefined,
+            keywords: effectiveKeyword || undefined,
+            location: effectiveLocation || undefined,
             page: String(page),
             size: String(pageSize),
             company: '',
             industry: '',
+            functionAreaId: effectiveFunctionAreaId ? String(effectiveFunctionAreaId) : undefined,
             ...expRange,
         };
         log.debug(`API search page ${page} payload: ${JSON.stringify(payload)}`);
@@ -302,13 +360,7 @@ await Actor.main(async () => {
     }
 
     async function runHtmlFallback() {
-        const initial = [];
-        if (Array.isArray(startUrls) && startUrls.length) initial.push(...startUrls);
-        if (startUrl) initial.push(startUrl);
-        if (url) initial.push(url);
-        if (!initial.length) initial.push(buildStartUrl(keyword, location, experience));
-
-        for (const start of initial) {
+        for (const start of initialUrls) {
             if (saved >= RESULTS_WANTED) break;
             try {
                 const res = await fetchHtml(start);
