@@ -332,6 +332,8 @@ Export your scraped data in multiple formats:
 
 The scraper is built using modern web scraping best practices:
 
+- **API-first**: Queries the official TimesJobs JSON search endpoint for speed and reliability, with detail enrichment via the public job detail API.
+- **HTML fallback**: If the API is blocked, it falls back to HTML parsing of provided URLs to salvage results.
 - **Efficient HTML Parsing**: Extracts data directly from HTML structure
 - **Pagination Handling**: Automatically navigates through result pages
 - **Error Recovery**: Built-in retry logic for failed requests
