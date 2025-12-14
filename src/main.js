@@ -189,6 +189,7 @@ await Actor.main(async () => {
             }
         };
 
+        const { headers: extraHeaders, ...restOpts } = opts || {};
         const attempt = async (useProxy) => {
             const res = await gotScraping({
                 proxyUrl: useProxy ? proxyUrl : undefined,
@@ -199,9 +200,9 @@ await Actor.main(async () => {
                     accept: 'application/json, text/plain, */*',
                     referer: 'https://www.timesjobs.com/job-search',
                     origin: 'https://www.timesjobs.com',
-                    ...opts.headers,
+                    ...(extraHeaders || {}),
                 },
-                ...opts,
+                ...restOpts,
             });
             return parseJsonResponse(res);
         };
