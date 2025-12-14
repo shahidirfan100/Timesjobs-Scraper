@@ -93,56 +93,103 @@ await Actor.main(async () => {
     const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration(proxyConfiguration) : null;
     const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
 
+    const fetchHtml = async (targetUrl) => {
+        const attempt = async (useProxy) => gotScraping({
+            url: targetUrl,
+            proxyUrl: useProxy ? proxyUrl : undefined,
+            timeout: { request: 30000 },
+            headers: {
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                referer: 'https://www.timesjobs.com/job-search',
+            },
+        });
+
+        try {
+            return await attempt(Boolean(proxyUrl));
+        } catch (err) {
+            const status = err?.response?.statusCode || err?.statusCode;
+            const msg = err?.message || '';
+            const proxyRelated = /UPSTREAM|proxy/i.test(msg);
+            const serverError = status && status >= 500 && status < 600;
+            if (proxyUrl && (proxyRelated || serverError)) {
+                log.warning(`HTML fetch via proxy failed (${msg || status}), retrying without proxy...`);
+                return attempt(false);
+            }
+            throw err;
+        }
+    };
+
     const seen = new Set();
     let saved = 0;
 
     const expRange = parseExperience(experience);
 
-    async function fetchJson(opts) {
-        const res = await gotScraping({
-            proxyUrl,
-            timeout: { request: 30000 },
-            retry: { limit: 2, statusCodes: [408, 429, 500, 502, 503, 504] },
-            headers: {
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                accept: 'application/json, text/plain, */*',
-                ...opts.headers,
-            },
-            ...opts,
-        });
-        return res.json();
+    async function fetchJson(opts, { allowDirectFallback = true } = {}) {
+        const attempt = async (useProxy) => {
+            const res = await gotScraping({
+                proxyUrl: useProxy ? proxyUrl : undefined,
+                timeout: { request: 30000 },
+                retry: { limit: 2, statusCodes: [408, 429, 500, 502, 503, 504] },
+                headers: {
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    accept: 'application/json, text/plain, */*',
+                    referer: 'https://www.timesjobs.com/job-search',
+                    origin: 'https://www.timesjobs.com',
+                    ...opts.headers,
+                },
+                ...opts,
+            });
+            return res.json();
+        };
+
+        try {
+            return await attempt(Boolean(proxyUrl));
+        } catch (err) {
+            const status = err?.response?.statusCode || err?.statusCode;
+            const msg = err?.message || '';
+            const proxyRelated = /UPSTREAM|proxy/i.test(msg);
+            const serverError = status && status >= 500 && status < 600;
+            if (proxyUrl && allowDirectFallback && (proxyRelated || serverError)) {
+                log.warning(`Proxy call failed (${msg || status}), retrying without proxy...`);
+                return attempt(false);
+            }
+            throw err;
+        }
     }
 
     async function fetchDetail(jobId, jobDetailUrl) {
-        if (!jobId) return {};
         try {
-            const detail = await fetchJson({ url: DETAIL_ENDPOINT(jobId), responseType: 'json', method: 'GET' });
-            return detail || {};
+            if (jobId) {
+                const detail = await fetchJson({ url: DETAIL_ENDPOINT(jobId), responseType: 'json', method: 'GET' });
+                return detail || {};
+            }
         } catch (err) {
             log.debug(`Detail API failed for ${jobId}: ${err.message}`);
-            if (!jobDetailUrl) return {};
-            try {
-                const res = await gotScraping({ url: jobDetailUrl, proxyUrl, timeout: { request: 30000 } });
-                const $ = cheerioLoad(res.body);
-                const ld = $('script[type="application/ld+json"]').map((_, el) => {
-                    try {
-                        return JSON.parse($(el).text());
-                    } catch (_) {
-                        return null;
-                    }
-                }).get().find((data) => data && data['@type'] === 'JobPosting');
-                const description_html = ld?.description || $('.jd-desc, .job-description, [class*="job-desc"]').first().html() || null;
-                return {
-                    description: description_html,
-                    title: ld?.title,
-                    company: ld?.hiringOrganization?.name,
-                    location: ld?.jobLocation?.address?.addressLocality,
-                    postDate: ld?.datePosted,
-                };
-            } catch (fallbackErr) {
-                log.debug(`HTML detail fallback failed for ${jobDetailUrl || jobId}: ${fallbackErr.message}`);
-                return {};
-            }
+        }
+
+        if (!jobDetailUrl) return {};
+
+        try {
+            const res = await fetchHtml(jobDetailUrl);
+            const $ = cheerioLoad(res.body);
+            const ld = $('script[type="application/ld+json"]').map((_, el) => {
+                try {
+                    return JSON.parse($(el).text());
+                } catch (_) {
+                    return null;
+                }
+            }).get().find((data) => data && data['@type'] === 'JobPosting');
+            const description_html = ld?.description || $('.jd-desc, .job-description, [class*="job-desc"]').first().html() || null;
+            return {
+                description: description_html,
+                title: ld?.title,
+                company: ld?.hiringOrganization?.name,
+                location: ld?.jobLocation?.address?.addressLocality,
+                postDate: ld?.datePosted,
+            };
+        } catch (fallbackErr) {
+            log.debug(`HTML detail fallback failed for ${jobDetailUrl || jobId}: ${fallbackErr.message}`);
+            return {};
         }
     }
 
@@ -257,7 +304,7 @@ await Actor.main(async () => {
         for (const start of initial) {
             if (saved >= RESULTS_WANTED) break;
             try {
-                const res = await gotScraping({ url: start, proxyUrl, timeout: { request: 30000 } });
+                const res = await fetchHtml(start);
                 const $ = cheerioLoad(res.body);
                 const jobLinks = [];
                 $('a[href*="jobid"], a[href*="job-detail"], a[href*="jobid="]').each((_, el) => {
