@@ -125,6 +125,13 @@ await Actor.main(async () => {
     const expRange = parseExperience(experience);
 
     async function fetchJson(opts, { allowDirectFallback = true } = {}) {
+        const parseJsonResponse = (res) => {
+            const body = res?.body;
+            if (body && typeof body === 'object' && !Buffer.isBuffer(body)) return body;
+            const text = Buffer.isBuffer(body) ? body.toString('utf-8') : String(body ?? '');
+            return JSON.parse(text);
+        };
+
         const attempt = async (useProxy) => {
             const res = await gotScraping({
                 proxyUrl: useProxy ? proxyUrl : undefined,
@@ -139,7 +146,7 @@ await Actor.main(async () => {
                 },
                 ...opts,
             });
-            return res.json();
+            return parseJsonResponse(res);
         };
 
         try {
