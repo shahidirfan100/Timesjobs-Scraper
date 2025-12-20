@@ -2,7 +2,7 @@
   "keyword": "software developer",
   "location": "Bengaluru",
   "experience": "0-5",
-  "results_wanted": 50,
-  "max_pages": 5,
+  "results_wanted": 10,
+  "max_pages": 2,
   "collectDetails": true
 }

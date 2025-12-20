@@ -46,7 +46,7 @@
       "description": "Maximum number of job listings to scrape. Set to a reasonable number to control scraping duration.",
       "minimum": 1,
       "maximum": 1000,
-      "default": 100,
+      "default": 10,
       "editor": "number"
     },
     "max_pages": {
@@ -56,7 +56,7 @@
       "minimum": 1,
       "maximum": 50,
       "editor": "number",
-      "default": 10
+      "default": 2
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
