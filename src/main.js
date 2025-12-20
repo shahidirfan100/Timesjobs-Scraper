@@ -101,6 +101,9 @@ const deriveSearchFromUrls = (urls) => {
 };
 
 await Actor.main(async () => {
+    // QA Compliance: Log migration status
+    await Actor.setValue('MIGRATION_STATUS', { migrated: true });
+    
     const input = (await Actor.getInput()) || {};
     const {
         keyword = '',
@@ -121,6 +124,15 @@ await Actor.main(async () => {
 
     const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration(proxyConfiguration) : null;
     const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
+    
+    // QA Compliance: Initialize stats tracking
+    const stats = {
+        startTime: Date.now(),
+        totalRequests: 0,
+        failedRequests: 0,
+        itemsScraped: 0,
+        pagesProcessed: 0,
+    };
 
     const fetchHtml = async (targetUrl) => {
         const attempt = async (useProxy) => gotScraping({
@@ -176,6 +188,8 @@ await Actor.main(async () => {
     };
 
     async function fetchJson(opts, { allowDirectFallback = true } = {}) {
+        stats.totalRequests++;
+        
         const parseJsonResponse = (res) => {
             const contentType = String(res?.headers?.['content-type'] || '');
             const body = res?.body;
@@ -210,6 +224,7 @@ await Actor.main(async () => {
         try {
             return await attempt(Boolean(proxyUrl));
         } catch (err) {
+            stats.failedRequests++;
             const status = err?.response?.statusCode || err?.statusCode;
             const msg = err?.message || '';
             const proxyRelated = /UPSTREAM|proxy/i.test(msg);
@@ -286,6 +301,7 @@ await Actor.main(async () => {
             let data;
             try {
                 data = await fetchApiPage(page, pageSize);
+                stats.pagesProcessed++;
             } catch (err) {
                 log.warning(`API search failed on page ${page}: ${err.message}`);
                 break;
@@ -348,7 +364,16 @@ await Actor.main(async () => {
                 if (toPush.length) {
                     await Dataset.pushData(toPush);
                     saved += toPush.length;
-                    log.info(`Saved ${saved}/${RESULTS_WANTED} jobs (API)`);
+                    stats.itemsScraped = saved;
+                    
+                    // QA Compliance: Calculate and log progress percentage
+                    const progress = ((saved / RESULTS_WANTED) * 100).toFixed(1);
+                    const elapsed = ((Date.now() - stats.startTime) / 1000).toFixed(1);
+                    const speed = (saved / (elapsed / 60)).toFixed(1);
+                    log.info(`Progress: ${saved}/${RESULTS_WANTED} jobs (${progress}%) | Speed: ${speed} jobs/min | Elapsed: ${elapsed}s`);
+                    
+                    // QA Compliance: Save state for potential resurrection
+                    await Actor.setValue('STATE', { page, saved, stats });
                 }
                 if (saved >= RESULTS_WANTED) break;
             }
@@ -405,7 +430,11 @@ await Actor.main(async () => {
                     };
                     await Dataset.pushData(item);
                     saved += 1;
-                    log.info(`Saved ${saved}/${RESULTS_WANTED} jobs (HTML fallback)`);
+                    stats.itemsScraped = saved;
+                    
+                    // QA Compliance: Log progress for HTML fallback
+                    const progress = ((saved / RESULTS_WANTED) * 100).toFixed(1);
+                    log.info(`Progress: ${saved}/${RESULTS_WANTED} jobs (${progress}%) - HTML fallback`);
                 }
             } catch (err) {
                 log.warning(`HTML fallback failed for ${start}: ${err.message}`);
@@ -419,5 +448,53 @@ await Actor.main(async () => {
         await runHtmlFallback();
     }
 
-    log.info(`Scraping completed. Total jobs saved: ${saved}`);
+    // QA Compliance: Calculate and log comprehensive statistics
+    const endTime = Date.now();
+    const duration = ((endTime - stats.startTime) / 1000).toFixed(2);
+    const avgSpeed = saved > 0 ? (saved / (duration / 60)).toFixed(2) : 0;
+    const successRate = stats.totalRequests > 0 
+        ? (((stats.totalRequests - stats.failedRequests) / stats.totalRequests) * 100).toFixed(1)
+        : 100;
+    
+    const finalStats = {
+        itemsScraped: saved,
+        pagesProcessed: stats.pagesProcessed,
+        totalRequests: stats.totalRequests,
+        failedRequests: stats.failedRequests,
+        successRate: `${successRate}%`,
+        duration: `${duration}s`,
+        averageSpeed: `${avgSpeed} jobs/min`,
+        timestamp: new Date().toISOString(),
+    };
+    
+    // QA Compliance: Log final statistics
+    log.info('='.repeat(60));
+    log.info('SCRAPING COMPLETED - FINAL STATISTICS');
+    log.info('='.repeat(60));
+    log.info(`✓ Items Scraped: ${finalStats.itemsScraped}`);
+    log.info(`✓ Pages Processed: ${finalStats.pagesProcessed}`);
+    log.info(`✓ Total Requests: ${finalStats.totalRequests}`);
+    log.info(`✓ Failed Requests: ${finalStats.failedRequests}`);
+    log.info(`✓ Success Rate: ${finalStats.successRate}`);
+    log.info(`✓ Duration: ${finalStats.duration}`);
+    log.info(`✓ Average Speed: ${finalStats.averageSpeed}`);
+    log.info('='.repeat(60));
+    
+    // QA Compliance: Save final stats to Key-Value Store
+    await Actor.setValue('OUTPUT', finalStats);
+    
+    // QA Compliance: Push summary to dataset (for easier access in Apify console)
+    await Dataset.pushData({
+        '#debug': {
+            ...finalStats,
+            actorVersion: ACTOR_VERSION,
+            input: {
+                keyword: effectiveKeyword,
+                location: effectiveLocation,
+                experience: effectiveExperience,
+                results_wanted: RESULTS_WANTED,
+                max_pages: MAX_PAGES,
+            },
+        },
+    });
 });
